@@ -295,17 +295,18 @@ def render_rank_list(data, max_n=5):
         bc, bt = pc_badge(row["p/c_score"])
         num_str = RANK_ICONS[i] if i < 5 else f"{i+1}"
         num_cls = RANK_CLS[i] if i < 3 else ""
-        st.markdown(f"""
-        <div class="rank-item">
-            <span class="rank-num {num_cls}">{num_str}</span>
-            <span class="rank-name">{row['商品名']}</span>
-            <div class="rank-meta">
-                <span class="rank-protein">{row['タンパク']}g</span>
-                <span class="rank-price">¥{int(row['値段'])}</span>
-                <span class="pc-badge {bc}">{bt}</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        name = esc(row['商品名'])
+        html = (
+            f'<div class="rank-item">'
+            f'<span class="rank-num {num_cls}">{num_str}</span>'
+            f'<span class="rank-name">{name}</span>'
+            f'<div class="rank-meta">'
+            f'<span class="rank-protein">{row["タンパク"]}g</span>'
+            f'<span class="rank-price">¥{int(row["値段"])}</span>'
+            f'<span class="pc-badge {bc}">{bt}</span>'
+            f'</div></div>'
+        )
+        st.markdown(html, unsafe_allow_html=True)
 
 def find_best_combos(df_lauk, df_karbo, df_bento, budget, n_lauk, n_karbo, include_bento, top_n=3):
     """Find top combos by total protein within budget."""
@@ -316,17 +317,15 @@ def find_best_combos(df_lauk, df_karbo, df_bento, budget, n_lauk, n_karbo, inclu
 
     def lauk_combos(remaining, n):
         eligible = candidates[candidates["値段"] <= remaining]
-        # Kalau n == 0 (tanpa lauk), return empty list
-        if n == 0:
-            return [[]]
-        elif len(eligible) < n:
-            combo = list(eligible.iloc[:].copy().iterrows())
-            # Hanya ambil Series-nya
-            combos = [[row for (idx, row) in combo]]
+        if len(eligible) < n:
+            combos = [list(eligible.itertuples())]
         else:
             combos = list(combinations(range(len(eligible)), n))
             combos = [[eligible.iloc[i] for i in c] for c in combos]
         return combos
+
+    def score_combo(items):
+        return sum(r["タンパク"] for r in items), sum(r["値段"] for r in items)
 
     if include_bento:
         # Bento mode: bento only (already complete meal)
@@ -351,44 +350,37 @@ def find_best_combos(df_lauk, df_karbo, df_bento, budget, n_lauk, n_karbo, inclu
                 continue
             remaining = budget - k_cost
 
-            lc = lauk_combos(remaining, n_lauk)
-            for lset in lc:
-                tp = sum(r["タンパク"] for r in lset)
-                tc = sum(r["値段"] for r in lset)
-                if tc <= remaining:
-                    item_list = []
-                    # Tambahkan karbo jika ada
-                    if k_item is not None:
-                        item_list.append({
-                            "name": k_item["商品名"],
-                            "price": k_item["値段"],
-                            "protein": k_item["タンパク"],
-                            "type": "karbo"
-                        })
-                    # Tambahkan lauk-lauk
-                    for r in lset:
-                        item_list.append({
-                            "name": r["商品名"],
-                            "price": r["値段"],
-                            "protein": r["タンパク"],
-                            "type": "lauk"
-                        })
-                    total_protein = (k_item["タンパク"] if k_item is not None else 0) + tp
-                    total_price = k_cost + tc
-                    results.append({
-                        "items": item_list,
-                        "total_protein": total_protein,
-                        "total_price": total_price
-                    })
+            if n_lauk == 0:
+                combo_results = [{"items": [], "protein": 0, "price": 0}]
+            else:
+                lc = lauk_combos(remaining, n_lauk)
+                combo_results = []
+                for lset in lc:
+                    tp = sum(r["タンパク"] for r in lset)
+                    tc = sum(r["値段"] for r in lset)
+                    if tc <= remaining:
+                        combo_results.append({"items": lset, "protein": tp, "price": tc})
+
+            for cr in combo_results:
+                item_list = []
+                if k_item is not None:
+                    item_list.append({"name": k_item["商品名"], "price": k_item["値段"],
+                                      "protein": k_item["タンパク"], "type": "karbo"})
+                for r in cr["items"]:
+                    item_list.append({"name": r["商品名"], "price": r["値段"],
+                                      "protein": r["タンパク"], "type": "lauk"})
+                tp = (k_item["タンパク"] if k_item is not None else 0) + cr["protein"]
+                tc = k_cost + cr["price"]
+                results.append({"items": item_list, "total_protein": tp, "total_price": tc})
 
     results.sort(key=lambda x: x["total_protein"], reverse=True)
     # Deduplicate by item name sets
-    seen = set()
+    seen = []
     unique = []
     for r in results:
         key = frozenset(i["name"] for i in r["items"])
         if key not in seen:
-            seen.add(key)
+            seen.append(key)
             unique.append(r)
         if len(unique) >= top_n:
             break
@@ -396,33 +388,44 @@ def find_best_combos(df_lauk, df_karbo, df_bento, budget, n_lauk, n_karbo, inclu
 
 TYPE_ICON = {"lauk": "🍗", "karbo": "🍞", "bento": "🍱"}
 
+def esc(text):
+    """Escape HTML special characters in product names."""
+    return (str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#39;"))
+
 def render_combo(combo, rank):
     rank_labels = ["🥇 Best Pick", "🥈 2nd Option", "🥉 3rd Option"]
     label = rank_labels[rank] if rank < 3 else f"#{rank+1}"
     rows_html = ""
     for item in combo["items"]:
         icon = TYPE_ICON.get(item["type"], "•")
-        rows_html += f"""
-        <div class="combo-row">
-            <span class="combo-icon">{icon}</span>
-            <span class="combo-name">{item['name']}</span>
-            <span class="combo-price-tag">¥{int(item['price'])} · {item['protein']}g</span>
-        </div>"""
-    st.markdown(f"""
-    <div class="combo-card">
-        <div class="combo-rank-label">{label}</div>
-        {rows_html}
-        <div class="combo-footer">
-            <div>
-                <span class="combo-total-protein">{combo['total_protein']:.1f}g</span>
-                <span class="combo-change-tag"> タンパク合計</span>
-            </div>
-            <div>
-                <span class="combo-total-price">¥{int(combo['total_price'])} 合計</span>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+        name = esc(item["name"])
+        price = int(item["price"])
+        protein = item["protein"]
+        rows_html += (
+            f'<div class="combo-row">'
+            f'<span class="combo-icon">{icon}</span>'
+            f'<span class="combo-name">{name}</span>'
+            f'<span class="combo-price-tag">¥{price} · {protein}g</span>'
+            f'</div>'
+        )
+    total_p = combo["total_protein"]
+    total_c = int(combo["total_price"])
+    html = (
+        f'<div class="combo-card">'
+        f'<div class="combo-rank-label">{label}</div>'
+        f'{rows_html}'
+        f'<div class="combo-footer">'
+        f'<div><span class="combo-total-protein">{total_p:.1f}g</span>'
+        f'<span class="combo-change-tag"> タンパク合計</span></div>'
+        f'<div><span class="combo-total-price">¥{total_c} 合計</span></div>'
+        f'</div></div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
 # === HEADER ===
 st.markdown("""
